@@ -1,0 +1,193 @@
+#!/usr/bin/env php
+<?php
+
+/*
+ * A simple script to build a composer-dev.json out of a composer.json
+ * and one or more composer-dev-repos.json with overrides to apply.
+ *
+ * For new "repositories" entry, we'll add that to the generated config,
+ * and if it is a "path" repository, and has it's own composer-dev-repos.json
+ * we'll recurse into that file as well. We'll only add each repository once,
+ * so no worries about infinite recursion or whatnot.
+ *
+ * In addition to adding the custom repos, we can also overridde entries in 
+ * the "require" and "require-dev" properties. These will also only be done
+ * once for any specific package name in either "require" or "require-dev".
+ *
+ * A couple special options can be set in the composer-dev-repos.json which
+ * aren't added to the composer-dev.json but affect the construction of it.
+ *
+ *  "pretty": true
+ *
+ *    Will use JSON_PRETTY_PRINT for composer-dev.json
+ *
+ *  "more-fields": []
+ *
+ *    The names of extra fields in addition to "require" and "require-dev" 
+ *    to be added from this configuration file. The same rules apply for these
+ *    fields as for the "require" and "require-dev" fields.
+ *
+ * You can then run composer with the 'dev' configuration using:
+ *
+ *   COMPOSER=composer-dev.json composer <command>
+ *
+ * See the 'lumc' script for a simplistic wrapper.
+ */
+
+const REPOS  = 'repositories';
+const REQ    = 'require';
+const REQDEV = 'require-dev';
+const URL    = 'url';
+const TYPE   = 'type';
+const PATH   = 'path';
+const PRETTY = 'pretty';
+const MORE   = 'more-fields';
+
+const RF = 'composer-dev-repos.json';
+const CF = 'composer.json';
+const DF = 'composer-dev.json';
+
+if (!file_exists(CF))
+  throw new Exception("Missing ".CF);
+
+if (!file_exists(RF))
+  throw new Exception("Missing ".RF);
+
+// A private class specifically for this script
+class DevConf
+{
+  private bool $pretty = false;
+  private array $overridden = [];
+  private array $seen = [];
+  private array $conf;
+
+  public function __construct()
+  {
+    $this->conf = json_decode(file_get_contents(CF), true);
+
+    if (!isset($this->conf))
+    {
+      throw new Exception("Could not parse '".CF."' as a valid JSON file");
+    }
+
+    error_log("Loading '".CF."' as template config.");
+
+    if (isset($this->conf[REPOS]))
+    {
+      foreach ($this->conf[REPOS] as $repo)
+      {
+        $this->see($repo);
+      }
+    }
+  }
+
+  private function see(array $repo): bool
+  {
+    if (isset($repo[URL]))
+    {
+      $url = $repo[URL];
+      if (isset($this->seen[$url]))
+      { // Already been seen.
+        return false;
+      }
+      else
+      { // Hasn't been seen yet, mark it down and process it.
+        $this->seen[$url] = true;
+        return true;
+      }
+    }
+    else
+    {
+      error_log("Skipping repository that was missing '".URL."' property:" 
+        . json_encode($repo));
+      return false;
+    }
+  }
+
+  public function add($mergefile, $toplevel=false): void
+  {
+    $rconf = json_decode(file_get_contents($mergefile), true);
+    if (!isset($rconf[REPOS]))
+    {
+      error_log("Skipping '$mergefile' as it's missing '".REPOS."'.");
+      return;
+    }
+
+    error_log("Adding '$mergefile' rules to development config.");
+
+    if ($toplevel && isset($rconf[PRETTY]) && is_bool($rconf[PRETTY]))
+    {
+      $this->pretty = $rconf[PRETTY];
+    }
+
+    foreach ($rconf[REPOS] as $repo)
+    {
+      if (!$this->see($repo))
+      { // That repo is either invalid, or has already been seen.
+        continue;
+      }
+
+      // Add the repository definition to our list.
+      $this->conf[REPOS][] = $repo;
+
+      if ($repo[TYPE] == PATH)
+      { // It's another path, see if it has a custom repos file.
+        $rdir = rtrim($repo[URL], '/');
+        $rfile = $rdir.'/'.RF;
+        if (file_exists($rfile))
+        { // Another custom repo definition file, add it.
+          $this->add($rfile);
+        }
+      }
+
+    } // foreach repo
+
+    // Default fields to look for.
+    $fields = [REQ, REQDEV];
+    if (isset($rconf[MORE]) && is_array($rconf[MORE]))
+    { // Extra fields were defined, look for them too.
+      $fields = array_merge($fields, $rconf[MORE]);
+    }
+
+    // Look for sections to override.
+    foreach ($fields as $rkey)
+    {
+      if (isset($rconf[$rkey]))
+      {
+        if (!isset($this->conf[$rkey]))
+        { // Add an empty array, we'll populate it below.
+          $this->conf[$rkey] = [];
+        }
+        if (!isset($this->overridden[$rkey]))
+        { // One here too.
+          $this->overridden[$rkey] = [];
+        }
+
+        foreach ($rconf[$rkey] as $okey => $oval)
+        { // Add or update the keys.
+          if (!isset($this->overridden[$rkey][$okey]))
+          { // Override the config item.
+            $this->conf[$rkey][$okey] = $oval;
+            $this->overridden[$rkey][$okey] = true;
+          }
+        }
+      }
+
+    } // foreach rkey
+
+  } // function add
+
+  public function save()
+  {
+    $flags = $this->pretty ? JSON_PRETTY_PRINT : 0;
+    file_put_contents(DF, json_encode($this->conf, $flags));
+  }
+
+}
+
+error_log("Building '".DF."' development config.");
+
+$devconf = new DevConf();
+$devconf->add(RF, true);
+$devconf->save();
+

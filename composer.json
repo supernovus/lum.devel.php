@@ -1,0 +1,23 @@
+{
+  "name": "lum/lum-devel",
+  "description": "Scripts for internal development of Lum.php packages",
+  "license": "MIT",
+  "authors":
+  [
+    {
+      "name": "Timothy Totten",
+      "email": "supernovus@gmail.com",
+      "role": "Original Author"
+    }
+  ],
+  "require":
+  {
+    "php": "^7.0 || ^8.0",
+    "ext-json": "*"
+  },
+  "bin": 
+  [
+    "bin/lumrepos", 
+    "bin/lumupdate"
+  ]
+}

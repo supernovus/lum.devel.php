@@ -1,0 +1,7 @@
+#!/bin/sh
+
+if [ -f "composer-dev.json" ]; then
+  COMPOSER=composer-dev.json composer $@
+else
+  composer $@
+fi
