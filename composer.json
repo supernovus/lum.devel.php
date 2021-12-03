@@ -18,6 +18,6 @@
   "bin": 
   [
     "bin/lumrepos", 
-    "bin/lumupdate"
+    "bin/lumc"
   ]
 }
