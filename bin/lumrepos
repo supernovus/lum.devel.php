@@ -11,8 +11,9 @@
  * so no worries about infinite recursion or whatnot.
  *
  * In addition to adding the custom repos, we can also overridde entries in 
- * the "require" and "require-dev" properties. These will also only be done
- * once for any specific package name in either "require" or "require-dev".
+ * the "require" and "require-dev" sections. If you set a package value to 
+ * null, it will be removed from that section. For each section we will only
+ * override a single package name once. The first file to override it "wins".
  *
  * A couple special options can be set in the composer-dev-repos.json which
  * aren't added to the composer-dev.json but affect the construction of it.
@@ -27,11 +28,16 @@
  *    to be added from this configuration file. The same rules apply for these
  *    fields as for the "require" and "require-dev" fields.
  *
+ *    In addition to removing individual properties from a section by setting
+ *    the property value to null, you can unset an entire section by setting 
+ *    it's value to null instead of an object/array.
+ *
  * You can then run composer with the 'dev' configuration using:
  *
  *   COMPOSER=composer-dev.json composer <command>
  *
  * See the 'lumc' script for a simplistic wrapper.
+ *
  */
 
 const REPOS  = 'repositories';
@@ -53,6 +59,24 @@ if (!file_exists(CF))
 if (!file_exists(RF))
   throw new Exception("Missing ".RF);
 
+function get_json($file, $fatal=false)
+{
+  $json = json_decode(file_get_contents($file), true);
+  if (!$json)
+  { // Wasn't able to parse the JSON document.
+    $msg = "Could not parse '$file' as a valid JSON file";
+    if ($fatal)
+    {
+      throw new Exception($msg);
+    }
+    else
+    {
+      error_log($msg);
+    }
+  }
+  return $json;
+}
+
 // A private class specifically for this script
 class DevConf
 {
@@ -63,12 +87,7 @@ class DevConf
 
   public function __construct()
   {
-    $this->conf = json_decode(file_get_contents(CF), true);
-
-    if (!isset($this->conf))
-    {
-      throw new Exception("Could not parse '".CF."' as a valid JSON file");
-    }
+    $this->conf = get_json(CF, true);
 
     error_log("Loading '".CF."' as template config.");
 
@@ -106,12 +125,8 @@ class DevConf
 
   public function add($mergefile, $toplevel=false): void
   {
-    $rconf = json_decode(file_get_contents($mergefile), true);
-    if (!isset($rconf[REPOS]))
-    {
-      error_log("Skipping '$mergefile' as it's missing '".REPOS."'.");
-      return;
-    }
+    $rconf = get_json($mergefile);
+    if (!$rconf) return;
 
     error_log("Adding '$mergefile' rules to development config.");
 
@@ -120,27 +135,30 @@ class DevConf
       $this->pretty = $rconf[PRETTY];
     }
 
-    foreach ($rconf[REPOS] as $repo)
-    {
-      if (!$this->see($repo))
-      { // That repo is either invalid, or has already been seen.
-        continue;
-      }
-
-      // Add the repository definition to our list.
-      $this->conf[REPOS][] = $repo;
-
-      if ($repo[TYPE] == PATH)
-      { // It's another path, see if it has a custom repos file.
-        $rdir = rtrim($repo[URL], '/');
-        $rfile = $rdir.'/'.RF;
-        if (file_exists($rfile))
-        { // Another custom repo definition file, add it.
-          $this->add($rfile);
+    if (isset($rconf[REPOS]))
+    { // Custom repositories.
+      foreach ($rconf[REPOS] as $repo)
+      {
+        if (!$this->see($repo))
+        { // That repo is either invalid, or has already been seen.
+          continue;
         }
-      }
-
-    } // foreach repo
+  
+        // Add the repository definition to our list.
+        $this->conf[REPOS][] = $repo;
+  
+        if ($repo[TYPE] == PATH)
+        { // It's another path, see if it has a custom repos file.
+          $rdir = rtrim($repo[URL], '/');
+          $rfile = $rdir.'/'.RF;
+          if (file_exists($rfile))
+          { // Another custom repo definition file, add it.
+            $this->add($rfile);
+          }
+        }
+  
+      } // foreach repo
+    } // if repos
 
     // Default fields to look for.
     $fields = [REQ, REQDEV];
@@ -152,26 +170,61 @@ class DevConf
     // Look for sections to override.
     foreach ($fields as $rkey)
     {
-      if (isset($rconf[$rkey]))
+      if (array_key_exists($rkey, $rconf))
       {
-        if (!isset($this->conf[$rkey]))
-        { // Add an empty array, we'll populate it below.
-          $this->conf[$rkey] = [];
-        }
-        if (!isset($this->overridden[$rkey]))
-        { // One here too.
-          $this->overridden[$rkey] = [];
-        }
-
-        foreach ($rconf[$rkey] as $okey => $oval)
-        { // Add or update the keys.
-          if (!isset($this->overridden[$rkey][$okey]))
-          { // Override the config item.
-            $this->conf[$rkey][$okey] = $oval;
-            $this->overridden[$rkey][$okey] = true;
+        $rval = $rconf[$rkey];
+        if (is_null($rval))
+        { // A null value can be used to remove an entire section.
+          if (isset($this->conf[$rkey]) && !isset($this->overridden[$rkey]))
+          { // It's not been overridden, remove it.
+            unset($this->conf[$rkey]);
+            $this->overridden[$rkey] = true;
           }
         }
-      }
+        elseif (is_array($rval))
+        { // It's a PHP array, let's keep track of it's nested properties.
+          if (!isset($this->overridden[$rkey]))
+          { // Add a storage container for overridden values.
+            $this->overridden[$rkey] = [];
+          }
+          elseif (!is_array($this->overridden[$rkey]))
+          { // The property was overridden, but wasn't an array.
+            continue;
+          }
+
+          if (!isset($this->conf[$rkey]))
+          { // Add an empty array, we'll populate it below.
+            $this->conf[$rkey] = [];
+          }
+
+          foreach ($rval as $okey => $oval)
+          { // Add or update the keys.
+            if (!isset($this->overridden[$rkey][$okey]))
+            { // Override the config item.
+              if (is_null($oval))
+              { // The null value is used to delete properties.
+                unset($this->conf[$rkey][$okey]);
+              }
+              else
+              { // Any other value will be assigned.
+                $this->conf[$rkey][$okey] = $oval;
+              }
+              // Mark it as overridden so we can skip it next time.
+              $this->overridden[$rkey][$okey] = true;
+            }
+          }
+
+        }
+        else
+        { // It's something other than an array or null.
+          if (!isset($this->overridden[$rkey]))
+          {
+            $this->conf[$rkey] = $rval;
+            $this->overridden[$rkey] = true;
+          }
+        }
+
+      } // if rkey exists
 
     } // foreach rkey
 
