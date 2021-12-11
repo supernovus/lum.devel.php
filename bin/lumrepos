@@ -18,11 +18,11 @@
  * A couple special options can be set in the composer-dev-repos.json which
  * aren't added to the composer-dev.json but affect the construction of it.
  *
- *  "pretty": true
+ *  "pretty": `true`
  *
  *    Will use JSON_PRETTY_PRINT for composer-dev.json
  *
- *  "more-fields": []
+ *  "more-fields": `[]`
  *
  *    The names of extra fields in addition to "require" and "require-dev" 
  *    to be added from this configuration file. The same rules apply for these
@@ -32,13 +32,66 @@
  *    the property value to null, you can unset an entire section by setting 
  *    it's value to null instead of an object/array.
  *
- * You can then run composer with the 'dev' configuration using:
+ *  "keep-existing": `false`
  *
- *   COMPOSER=composer-dev.json composer <command>
+ *    If set to `true`, we'll mark existing "repositories" entries in the
+ *    'composer.json' file as having been seen, so they won't be processed
+ *    any further. If set to `false`, they'll be removed entirely and only
+ *    the "repositories" in the composer-dev-repos.json files will be counted.
  *
- * See the 'lumc' script for a simplistic wrapper.
+ *  "recurse-existing": `true`
+ *
+ *    Instead of simply marking existing "repositories" entries as having been
+ *    seen, we will process them as if they had been defined in the top-level
+ *    composer-dev-repos.json file, so "repository-replace" rules will be
+ *    processed, and any composer-dev-repos.json files in each of the repo
+ *    URLs will be processed recursively.
+ *
+ *    This has does nothing at all if "keep-existing" is `false`.
+ *
+ *  "repository-replace": `[]`
+ *
+ *    An array of arrays, where each child array has three elements.
+ *    The first element should be an integer representing which `mode` to use,
+ *    the second element is the `find` parameter, and the third is the
+ *    `replace` parameter. 
+ *
+ *    The currently supported modes:
+ *
+ *    - `0`: Command mode (substitute, delete, done, skip.)
+ *    - `1`: Simple search and replace (probably most common.)
+ *    - `2`: Case-insensitive search and replace.
+ *    - `3`: Advanced replacement using regular expressions.
+ *    
+ *    The supported values for `find` and `replace` depends on the mode:
+ *
+ *    - `0` -- Command mode uses `replace` to determine the command.
+ *
+ *        - `string, string`  : Use `replace` for any `url` containing `find`.
+ *        - `string, null`    : Delete any repos with `url` containing `find`.
+ *        - `string, true`    : If `url` contains `find`, skip further rules.
+ *        - `string, false`   : If `url` contains `find`, skip ALL rules.
+ *
+ *    - `1 | 2 | 3` -- These modes use PHP built-ins with the same API.
+ *
+ *        - `string, string`  : Replace `find` with `replace` in the `url`.
+ *        - `array,  string`  : Replace any `find` values with one `replace`.
+ *        - `array,  array`   : Use a separate `replace` value for each `find`.
+ *
+ *    Generally the "repository-replace" is mostly useful if you have different
+ *    repository root directories depending on the top-level project you are
+ *    working on, and want to make sure the correct ones are always used.
+ *
+ * Once you have ran this script and generated your composer-dev.json config,
+ * You can run tell composer to use it by using:
+ *
+ *   `COMPOSER=composer-dev.json composer <command>`
+ *
+ * See the 'bin/lumc' script for a simplistic wrapper.
  *
  */
+
+namespace Lum\Devel;
 
 const REPOS  = 'repositories';
 const REQ    = 'require';
@@ -48,6 +101,9 @@ const TYPE   = 'type';
 const PATH   = 'path';
 const PRETTY = 'pretty';
 const MORE   = 'more-fields';
+const REPREP = 'repository-replace';
+const KEEPER = 'keep-existing';
+const RECREP = 'recurse-existing';
 
 const RF = 'composer-dev-repos.json';
 const CF = 'composer.json';
@@ -59,6 +115,7 @@ if (!file_exists(CF))
 if (!file_exists(RF))
   throw new Exception("Missing ".RF);
 
+// Get JSON or emit an error message.
 function get_json($file, $fatal=false)
 {
   $json = json_decode(file_get_contents($file), true);
@@ -77,27 +134,94 @@ function get_json($file, $fatal=false)
   return $json;
 }
 
-// A private class specifically for this script
+// Perform replacements on the repository paths.
+class ReplacementRules
+{
+  const COMMAND_MODE = 0;
+  const STRING_MODE  = 1;
+  const NOCASE_MODE  = 2;
+  const REGEXP_MODE  = 3;
+
+  private array $rules;
+
+  public function __construct(array $rules)
+  {
+    $this->rules = $rules;
+  }
+
+  public function parse (string $origPath)
+  {
+    // Make a working copy of the path, leaving origPath unmodified.
+    $path = $origPath; 
+
+    foreach ($this->rules as $rule)
+    {
+      if (!is_array($rule) || !count($rule) === 3)
+      {
+        error_log("invalid replacement rule format: ".json_encode($rule));
+        continue;
+      }
+
+      // Make a backup copy of the path before any changes.
+      $prevPath = $path;
+
+      list($type, $find, $replace) = $rule;
+
+      switch($type)
+      {
+        case self::COMMAND_MODE:
+          if (strpos($path, $find) !== false) $path = $replace;
+          break;
+        case self::STRING_MODE:
+          $path = str_replace($find, $replace, $path);
+          break;
+        case self::NOCASE_MODE:
+          $path = str_ireplace($find, $replace, $path);
+          break;
+        case self::REGEXP_MODE:
+          $path = preg_replace($find, $replace, $path);
+          break;
+        default:
+          error_log("invalid replacement rule type in: ".json_encode($rule));
+      }
+
+      if ($path === true)
+      { // Command mode set the path to true, return the $prevPath.
+        return $prevPath;
+      }
+      elseif ($path === false)
+      { // Command mode set the path to false, return the $origPath.
+        return $origPath;
+      }
+      elseif (!is_null($path))
+      { // Command mode set the path to null, delete the repo.
+        return $path;
+      }
+      elseif (!is_string($path))
+      { // That's not valid, and we should never see this.
+        error_log("invalid replacement rule value in: ".json_encode($rule));
+      }
+
+    } // foreach rules
+
+    return $path; 
+  } // parse()
+
+} // class ReplacementRules
+
+// Generate our composer-dev.json configuration file.
 class DevConf
 {
   private bool $pretty = false;
   private array $overridden = [];
   private array $seen = [];
   private array $conf;
+  private $reps;
 
-  public function __construct()
+  public function __construct($file)
   {
-    $this->conf = get_json(CF, true);
-
-    error_log("Loading '".CF."' as template config.");
-
-    if (isset($this->conf[REPOS]))
-    {
-      foreach ($this->conf[REPOS] as $repo)
-      {
-        $this->see($repo);
-      }
-    }
+    $this->conf = get_json($file, true);
+    error_log("Loading '$file' as template config.");
   }
 
   private function see(array $repo): bool
@@ -123,6 +247,148 @@ class DevConf
     }
   }
 
+  private function top_level (&$rconf)
+  {
+    if (isset($rconf[PRETTY]) && is_bool($rconf[PRETTY]))
+    { // Toggle pretty-print mode.
+      $this->pretty = $rconf[PRETTY];
+    }
+    if (isset($rconf[REPREP]) && is_array($rconf[REPREP]))
+    { // Set up a ReplacementRules instance.
+      $this->reps = new ReplacementRules($rconf[REPREP]);
+    }
+    if (isset($rconf[KEEPER]) && $rconf[KEEPER])
+    { // We want to keep existing 'repositories'.
+      if (isset($this->conf[REPOS]) && count($this->conf[REPOS]) > 0)
+      {
+        $recurse = isset($rconf[RECREP]) ? (bool)$rconf[RECREP] : false;
+
+        if ($recurse && !isset($rconf[REPOS]))
+        { // Make sure 'repositories' is set in our $rconf
+          $rconf[REPOS] = [];
+        }
+
+        foreach ($this->conf[REPOS] as $repo)
+        {
+          if ($recurse)
+          { // Move the repo into the $rconf so it will be processed.
+            $rconf[REPOS][] = $repo;
+          }
+          $this->see($repo);
+        }
+
+        if ($recurse)
+        { // Clear the conf repos, they'll be rebuilt soon enough.
+          $this->conf[REPOS] = [];
+        }
+      }
+    }
+    else
+    { // We're not keeping existing repos, so set them to a blank slate.
+      $this->conf[REPOS] = [];
+    }
+  }
+
+  private function parse_repo ($repo)
+  {
+    if (!isset($repo[TYPE], $repo[URL]))
+    {
+      error_log("Skippg invalid repository: ".json_encode($repo));
+      return;
+    }
+
+    $isPath = ($repo[TYPE] === PATH);
+
+    if ($isPath && isset($this->reps))
+    { // It's a path repo, and we have Replacement rules.
+      $newUrl = $this->reps->parse($repo[URL]);
+      if (is_null($newUrl))
+      { // A null return value means skip this repo.
+        return; 
+      }
+      elseif (is_string($newUrl) && trim($newUrl) != '')
+      { // Make sure the URL is updated.
+        $repo[URL] = $newUrl;
+      }
+    }
+
+    if (!$this->see($repo))
+    { // That repo is either invalid, or has already been seen.
+      return;
+    }
+
+    // Add the repository definition to our list.
+    $this->conf[REPOS][] = $repo;
+
+    if ($isPath)
+    { // It's another path, see if it has a custom repos file.
+      $rdir = rtrim($repo[URL], '/');
+      $rfile = $rdir.'/'.RF;
+      if (file_exists($rfile))
+      { // Another custom repo definition file, add it.
+        $this->add($rfile);
+      }
+    }
+  }
+
+  private function override_section ($rconf, $rkey)
+  {
+    if (array_key_exists($rkey, $rconf))
+    {
+      $rval = $rconf[$rkey];
+      if (is_null($rval))
+      { // A null value can be used to remove an entire section.
+        if (isset($this->conf[$rkey]) && !isset($this->overridden[$rkey]))
+        { // It's not been overridden, remove it.
+          unset($this->conf[$rkey]);
+          $this->overridden[$rkey] = true;
+        }
+      }
+      elseif (is_array($rval))
+      { // It's a PHP array, let's keep track of it's nested properties.
+        if (!isset($this->overridden[$rkey]))
+        { // Add a storage container for overridden values.
+          $this->overridden[$rkey] = [];
+        }
+        elseif (!is_array($this->overridden[$rkey]))
+        { // The property was overridden, but wasn't an array.
+          return;
+        }
+
+        if (!isset($this->conf[$rkey]))
+        { // Add an empty array, we'll populate it below.
+          $this->conf[$rkey] = [];
+        }
+
+        foreach ($rval as $okey => $oval)
+        { // Add or update the keys.
+          if (!isset($this->overridden[$rkey][$okey]))
+          { // Override the config item.
+            if (is_null($oval))
+            { // The null value is used to delete properties.
+              unset($this->conf[$rkey][$okey]);
+            }
+            else
+            { // Any other value will be assigned.
+              $this->conf[$rkey][$okey] = $oval;
+            }
+            // Mark it as overridden so we can skip it next time.
+            $this->overridden[$rkey][$okey] = true;
+          }
+        }
+
+      }
+      else
+      { // It's something other than an array or null.
+        if (!isset($this->overridden[$rkey]))
+        {
+          $this->conf[$rkey] = $rval;
+          $this->overridden[$rkey] = true;
+        }
+      }
+    } // if rkey exists
+  }
+
   public function add($mergefile, $toplevel=false): void
   {
     $rconf = get_json($mergefile);
@@ -130,35 +396,18 @@ class DevConf
 
     error_log("Adding '$mergefile' rules to development config.");
 
-    if ($toplevel && isset($rconf[PRETTY]) && is_bool($rconf[PRETTY]))
-    {
-      $this->pretty = $rconf[PRETTY];
+    if ($toplevel)
+    { // Certain properties only read in the top-level config.
+      $this->top_level($rconf);
     }
 
     if (isset($rconf[REPOS]))
     { // Custom repositories.
       foreach ($rconf[REPOS] as $repo)
       {
-        if (!$this->see($repo))
-        { // That repo is either invalid, or has already been seen.
-          continue;
-        }
-  
-        // Add the repository definition to our list.
-        $this->conf[REPOS][] = $repo;
-  
-        if ($repo[TYPE] == PATH)
-        { // It's another path, see if it has a custom repos file.
-          $rdir = rtrim($repo[URL], '/');
-          $rfile = $rdir.'/'.RF;
-          if (file_exists($rfile))
-          { // Another custom repo definition file, add it.
-            $this->add($rfile);
-          }
-        }
-  
-      } // foreach repo
-    } // if repos
+        $this->parse_repo($repo);  
+      }
+    }
 
     // Default fields to look for.
     $fields = [REQ, REQDEV];
@@ -170,65 +419,10 @@ class DevConf
     // Look for sections to override.
     foreach ($fields as $rkey)
     {
-      if (array_key_exists($rkey, $rconf))
-      {
-        $rval = $rconf[$rkey];
-        if (is_null($rval))
-        { // A null value can be used to remove an entire section.
-          if (isset($this->conf[$rkey]) && !isset($this->overridden[$rkey]))
-          { // It's not been overridden, remove it.
-            unset($this->conf[$rkey]);
-            $this->overridden[$rkey] = true;
-          }
-        }
-        elseif (is_array($rval))
-        { // It's a PHP array, let's keep track of it's nested properties.
-          if (!isset($this->overridden[$rkey]))
-          { // Add a storage container for overridden values.
-            $this->overridden[$rkey] = [];
-          }
-          elseif (!is_array($this->overridden[$rkey]))
-          { // The property was overridden, but wasn't an array.
-            continue;
-          }
+      $this->override_section($rconf, $rkey);
+    }
 
-          if (!isset($this->conf[$rkey]))
-          { // Add an empty array, we'll populate it below.
-            $this->conf[$rkey] = [];
-          }
-
-          foreach ($rval as $okey => $oval)
-          { // Add or update the keys.
-            if (!isset($this->overridden[$rkey][$okey]))
-            { // Override the config item.
-              if (is_null($oval))
-              { // The null value is used to delete properties.
-                unset($this->conf[$rkey][$okey]);
-              }
-              else
-              { // Any other value will be assigned.
-                $this->conf[$rkey][$okey] = $oval;
-              }
-              // Mark it as overridden so we can skip it next time.
-              $this->overridden[$rkey][$okey] = true;
-            }
-          }
-
-        }
-        else
-        { // It's something other than an array or null.
-          if (!isset($this->overridden[$rkey]))
-          {
-            $this->conf[$rkey] = $rval;
-            $this->overridden[$rkey] = true;
-          }
-        }
-
-      } // if rkey exists
-
-    } // foreach rkey
-
-  } // function add
+  } // function add()
 
   public function save()
   {
@@ -240,7 +434,7 @@ class DevConf
 
 error_log("Building '".DF."' development config.");
 
-$devconf = new DevConf();
+$devconf = new DevConf(CF);
 $devconf->add(RF, true);
 $devconf->save();
 
