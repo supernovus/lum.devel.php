@@ -12,7 +12,7 @@
   ],
   "require":
   {
-    "lum/lum-compat": "^1.0"
+    "lum/lum-compat": "1.x-dev"
   },
   "bin": 
   [
