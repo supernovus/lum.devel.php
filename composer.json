@@ -12,11 +12,18 @@
   ],
   "require":
   {
-    "lum/lum-compat": "^1.0"
+    "lum/lum-compat": "2.x-dev"
   },
   "bin": 
   [
     "bin/lumrepos", 
     "bin/lumc"
-  ]
+  ],
+  "extra":
+  {
+    "branch-alias":
+    {
+      "dev-main": "2.x-dev"
+    }
+  }
 }
