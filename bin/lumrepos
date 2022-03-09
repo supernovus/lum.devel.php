@@ -93,6 +93,8 @@
 
 namespace Lum\Devel;
 
+use \Exception;
+
 const REPOS  = 'repositories';
 const REQ    = 'require';
 const REQDEV = 'require-dev';
