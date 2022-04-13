@@ -195,7 +195,7 @@ class ReplacementRules
       { // Command mode set the path to false, return the $origPath.
         return $origPath;
       }
-      elseif (!is_null($path))
+      elseif (is_null($path))
       { // Command mode set the path to null, delete the repo.
         return $path;
       }
