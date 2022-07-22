@@ -1,7 +1,21 @@
 #!/bin/sh
 
+SDIR=`dirname $0`
+
+if [ "$1" = "-c" ]; then
+  shift; # Pass through the rest directly.
+elif [ "$1" = "repos" ]; then
+  $SDIR/lumrepos
+  exit
+elif [ "$1" = "refresh" ]; then
+  $SDIR/lumrepos
+  $SDIR/lumc update
+  exit
+fi
+
 if [ -f "composer-dev.json" ]; then
   COMPOSER=composer-dev.json composer $@
 else
   composer $@
 fi
+
